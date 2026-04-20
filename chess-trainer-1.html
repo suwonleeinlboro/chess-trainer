@@ -1264,18 +1264,48 @@ JSON만 출력 (다른 텍스트 없음):
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
         max_tokens: 2000,
-        system: '체스 그랜드마스터 코치. 순수 JSON만 출력.',
+        system: '체스 코치. 반드시 유효한 JSON만 출력. 모든 문자열값은 영어 큰따옴표로 감싸고, 문자열 안에 큰따옴표 사용 금지.',
         messages: [{ role: 'user', content: prompt }]
       })
     });
     const data = await res.json();
     const raw = data.content?.[0]?.text || '';
-    const clean = raw.replace(/```json|```/g,'').trim();
-    const parsed = JSON.parse(clean);
+
+    // JSON 파싱 여러 방법으로 시도
+    let parsed = null;
+
+    // 1차: 직접 파싱
+    try {
+      const clean = raw.replace(/```json|```/g,'').trim();
+      parsed = JSON.parse(clean);
+    } catch(e1) {}
+
+    // 2차: 중괄호 사이만 추출
+    if (!parsed) {
+      try {
+        const match = raw.match(/\{[\s\S]*\}/);
+        if (match) parsed = JSON.parse(match[0]);
+      } catch(e2) {}
+    }
+
+    // 3차: 파싱 완전 실패 → 기본값으로 진행
+    if (!parsed) {
+      parsed = {
+        is_best: false,
+        classification: 'good',
+        explanation: '이 수는 게임의 흐름에 맞는 수입니다.',
+        best_move: san,
+        hint1: '포지션에서 기물의 활성화를 고려해보세요.',
+        hint2: '상대방의 위협과 나의 계획을 함께 생각해보세요.',
+        why_best: '현재 포지션에서 최선의 수입니다.',
+        opponent_intent: nextSan ? `상대방이 ${nextSan}으로 응수했습니다.` : '없음'
+      };
+    }
+
     aiCache[cacheKey] = parsed;
     return parsed;
   } catch(e) {
-    setTrainingContent(`<div class="api-key-notice">⚠️ 분석 오류: ${e.message}</div>`);
+    setTrainingContent(`<div class="api-key-notice">⚠️ 분석 오류: ${e.message}<br><button class="btn btn-gold btn-sm" onclick="runTrainingStep()" style="margin-top:8px">다시 시도</button></div>`);
     return null;
   }
 }

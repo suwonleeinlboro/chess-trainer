@@ -353,6 +353,24 @@
       </div>
     </div>
 
+    <!-- 훈련 모드 패널 -->
+    <div class="panel" id="training-panel" style="display:none">
+      <div class="panel-header">
+        <div class="ph-left">🎓 훈련 모드</div>
+        <button class="btn btn-outline btn-sm" onclick="stopTraining();hideTrainingPanel()" style="font-size:10px;padding:4px 8px">종료</button>
+      </div>
+      <div id="training-content">
+        <div class="ai-loading"><div class="ai-spinner"></div>준비 중...</div>
+      </div>
+    </div>
+
+    <!-- 훈련 시작 버튼 -->
+    <div style="padding:0 0 14px 0">
+      <button class="btn btn-gold" id="btn-start-training" onclick="startTraining()" disabled style="width:100%;justify-content:center;font-size:14px;padding:12px">
+        🎓 훈련 모드 시작 — 첫 수부터 같이 분석해요
+      </button>
+    </div>
+
     <!-- Stockfish (숫자 평가) - 접을 수 있는 섹션 -->
     <div class="panel">
       <div class="panel-header">
@@ -642,6 +660,7 @@ function loadGameData(parsed){
   document.getElementById('tab-board').style.display='';
   document.getElementById('btn-analyze').disabled=false;
   document.getElementById('btn-save').disabled=false;
+  document.getElementById('btn-start-training').disabled=false;
   document.getElementById('summary-panel').style.display='none';
   aiCache = {}; // 새 게임 로드시 캐시 초기화
   resetAnalysisCard();
@@ -1129,6 +1148,458 @@ function renderAiResult({ parsed, idx, san, isWhite, moveNum, nextSan }) {
 
 function escHtml(str) {
   return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
+}
+
+// ══════════════════════════════════════════════
+// 4단계: 훈련 모드
+// ══════════════════════════════════════════════
+let trainingMode = false;
+let trainingState = {
+  moveIdx: 0,       // 현재 훈련 중인 수 인덱스 (0부터)
+  phase: 'my_move', // 'my_move' | 'puzzle' | 'opponent' | 'summary'
+  hintLevel: 0,     // 0=힌트없음, 1=첫힌트, 2=더많은힌트
+  attempts: 0,      // 문제 시도 횟수
+  puzzleAnswer: '', // 정답 수
+  results: []       // 각 수의 훈련 결과 기록
+};
+
+function startTraining() {
+  if (!game.moves.length) { showToast('⚠️ 게임을 먼저 불러오세요'); return; }
+  if (!getApiKey()) { showToast('⚠️ API 키를 먼저 입력하세요'); return; }
+  trainingMode = true;
+  trainingState = { moveIdx: 0, phase: 'my_move', hintLevel: 0, attempts: 0, puzzleAnswer: '', results: [] };
+  switchTab('board');
+  goToMove(1);
+  showTrainingPanel();
+  runTrainingStep();
+}
+
+function stopTraining() {
+  trainingMode = false;
+  showToast('훈련 모드 종료');
+  document.getElementById('training-panel').style.display = 'none';
+}
+
+function showTrainingPanel() {
+  document.getElementById('training-panel').style.display = '';
+  document.getElementById('ai-analysis-panel').style.display = 'none';
+}
+
+function hideTrainingPanel() {
+  document.getElementById('training-panel').style.display = 'none';
+  document.getElementById('ai-analysis-panel').style.display = '';
+}
+
+async function runTrainingStep() {
+  const idx = trainingState.moveIdx;
+  if (idx >= game.moves.length) {
+    // 모든 수 완료 → 최종 총평
+    await showGameSummary();
+    return;
+  }
+
+  goToMove(idx + 1);
+  const san = game.moves[idx];
+  const isWhite = idx % 2 === 0;
+  const moveNum = Math.floor(idx / 2) + 1;
+  const side = isWhite ? '⬜ 백' : '⬛ 흑';
+
+  setTrainingContent(`<div class="ai-loading"><div class="ai-spinner"></div>AI 분석 중... (${moveNum}번째 수 · ${side} · ${san})</div>`);
+
+  // AI 분석 호출
+  const analysis = await fetchTrainingAnalysis(idx);
+  if (!analysis) return;
+
+  trainingState.phase = 'my_move';
+  trainingState.hintLevel = 0;
+  trainingState.attempts = 0;
+
+  if (analysis.is_best) {
+    // 최선의 수 → 설명 보여주고 다음으로
+    showBestMoveResult(analysis, san, isWhite, moveNum);
+  } else {
+    // 최선이 아님 → 문제 출제
+    trainingState.puzzleAnswer = analysis.best_move || '';
+    trainingState.phase = 'puzzle';
+    showPuzzle(analysis, san, isWhite, moveNum);
+  }
+}
+
+async function fetchTrainingAnalysis(idx) {
+  const san = game.moves[idx];
+  const isWhite = idx % 2 === 0;
+  const side = isWhite ? '백(White)' : '흑(Black)';
+  const moveNum = Math.floor(idx / 2) + 1;
+  const history = buildMoveHistory(idx);
+  const gameCtx = buildGameContext();
+  const nextSan = game.moves[idx + 1] || null;
+
+  // 캐시 확인
+  const cacheKey = `training_${game.pgn.slice(0,50)}_${idx}`;
+  if (aiCache[cacheKey]) return aiCache[cacheKey];
+
+  const prompt = `당신은 체스 그랜드마스터 수준의 코치입니다.
+
+[게임 정보] ${gameCtx}
+[지금까지 수순] ${history}
+[분석할 수] ${moveNum}번째 수 · ${side} · ${san}
+
+아래 JSON만 출력하세요 (다른 텍스트 없음):
+{
+  "is_best": true 또는 false,
+  "classification": "best|good|inaccuracy|mistake|blunder",
+  "explanation": "이 수의 의미와 전략적 이유를 3~4문장으로. 장단점 모두 포함",
+  "best_move": "최선의 수가 아니라면 구체적인 수 표기 (예: Nf3). 최선이면 '${san}'",
+  "hint1": "최선이 아닐 때 첫 번째 힌트 — 어떤 방향을 봐야 하는지 (수를 직접 말하지 말 것)",
+  "hint2": "두 번째 힌트 — 좀 더 구체적인 힌트 (수를 직접 말하지 말 것)",
+  "why_best": "최선의 수가 왜 더 나은지 2~3문장으로 설명",
+  "opponent_intent": "${nextSan ? `상대방 ${nextSan}의 의도와 위협 2문장` : '없음'}"
+}`;
+
+  try {
+    const key = getApiKey();
+    const res = await fetch('https://chess-api.suwonleeinlboro.workers.dev', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': key },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1200,
+        system: '체스 그랜드마스터 코치. 순수 JSON만 출력.',
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+    const data = await res.json();
+    const raw = data.content?.[0]?.text || '';
+    const clean = raw.replace(/```json|```/g,'').trim();
+    const parsed = JSON.parse(clean);
+    aiCache[cacheKey] = parsed;
+    return parsed;
+  } catch(e) {
+    setTrainingContent(`<div class="api-key-notice">⚠️ 분석 오류: ${e.message}</div>`);
+    return null;
+  }
+}
+
+function showBestMoveResult(analysis, san, isWhite, moveNum) {
+  const nextSan = game.moves[trainingState.moveIdx + 1] || null;
+  const side = isWhite ? '⬜ 백' : '⬛ 흑';
+
+  let html = `
+    <div style="padding:16px;display:flex;flex-direction:column;gap:14px">
+      <div style="display:flex;align-items:center;gap:10px">
+        <span class="eval-badge badge-best">✨ 최선의 수!</span>
+        <span style="font-size:14px;font-weight:700">${side} · ${san}</span>
+        <span style="font-size:11px;color:var(--muted)">${moveNum}번째 수</span>
+      </div>
+      <div class="best-explanation">${escHtml(analysis.explanation||'')}</div>`;
+
+  if (nextSan && analysis.opponent_intent && analysis.opponent_intent !== '없음') {
+    html += `
+      <div class="opponent-box" style="border-radius:4px;padding:12px 14px">
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:1.5px;color:var(--gold);margin-bottom:6px">⚔️ 상대방 응수 · ${nextSan}</div>
+        ${escHtml(analysis.opponent_intent)}
+      </div>`;
+  }
+
+  html += `
+      <button class="btn btn-gold" onclick="nextTrainingStep()" style="width:100%">
+        다음 수로 → (${trainingState.moveIdx + 2}/${game.moves.length})
+      </button>
+    </div>`;
+
+  // 결과 기록
+  trainingState.results.push({ idx: trainingState.moveIdx, san, isBest: true, attempts: 0 });
+  setTrainingContent(html);
+}
+
+function showPuzzle(analysis, san, isWhite, moveNum) {
+  const side = isWhite ? '⬜ 백' : '⬛ 흑';
+  const cls = analysis.classification || 'mistake';
+  const badgeClass = getClassBadge(cls);
+  const clsLabel = getClassLabel(cls);
+
+  let html = `
+    <div style="padding:16px;display:flex;flex-direction:column;gap:14px">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <span class="eval-badge ${badgeClass}">${clsLabel}</span>
+        <span style="font-size:14px;font-weight:700">${side} · ${san}</span>
+        <span style="font-size:11px;color:var(--muted)">${moveNum}번째 수</span>
+      </div>
+
+      <div class="ai-section">
+        <div class="ai-section-header">📖 내가 둔 수</div>
+        <div class="ai-section-body">${escHtml(analysis.explanation||'')}</div>
+      </div>
+
+      <div class="hint-box">
+        <div class="hint-label">🎯 문제</div>
+        이 포지션에서 더 나은 수가 있습니다.<br>
+        <strong style="color:var(--text)">최선의 수는 무엇일까요?</strong>
+      </div>`;
+
+  // 힌트 표시
+  if (trainingState.hintLevel >= 1) {
+    html += `
+      <div class="hint-box" style="border-color:rgba(74,158,255,0.3)">
+        <div class="hint-label" style="color:var(--accent)">💡 힌트 1</div>
+        ${escHtml(analysis.hint1||'')}
+      </div>`;
+  }
+  if (trainingState.hintLevel >= 2) {
+    html += `
+      <div class="hint-box" style="border-color:rgba(201,168,76,0.3)">
+        <div class="hint-label" style="color:var(--gold)">💡 힌트 2</div>
+        ${escHtml(analysis.hint2||'')}
+      </div>`;
+  }
+
+  html += `
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <input id="puzzle-input" type="text" placeholder="수를 입력하세요 (예: Nf3, e4, O-O)"
+          style="flex:1;min-width:150px;background:var(--surface2);border:1px solid var(--border);border-radius:3px;color:var(--text);padding:9px 12px;font-family:'JetBrains Mono',monospace;font-size:14px;outline:none;"
+          onkeydown="if(event.key==='Enter')checkPuzzleAnswer()">
+        <button class="btn btn-gold" onclick="checkPuzzleAnswer()">확인 ✓</button>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        ${trainingState.hintLevel < 2 ? `<button class="btn btn-outline btn-sm" onclick="showHint()">💡 힌트 보기</button>` : ''}
+        <button class="btn btn-outline btn-sm" onclick="giveUp()">정답 보기</button>
+      </div>
+    </div>`;
+
+  setTrainingContent(html);
+  setTimeout(() => document.getElementById('puzzle-input')?.focus(), 100);
+}
+
+function checkPuzzleAnswer() {
+  const input = document.getElementById('puzzle-input');
+  if (!input) return;
+  const answer = input.value.trim().replace(/[+#!?]/g,'');
+  const correct = trainingState.puzzleAnswer.replace(/[+#!?]/g,'');
+
+  trainingState.attempts++;
+
+  if (answer.toLowerCase() === correct.toLowerCase()) {
+    // 정답!
+    trainingState.results.push({
+      idx: trainingState.moveIdx,
+      san: game.moves[trainingState.moveIdx],
+      isBest: false,
+      attempts: trainingState.attempts
+    });
+    showPuzzleCorrect();
+  } else {
+    // 오답
+    input.style.borderColor = 'var(--danger)';
+    input.style.background = 'rgba(239,68,68,0.08)';
+    setTimeout(() => {
+      input.style.borderColor = '';
+      input.style.background = '';
+      input.value = '';
+      input.placeholder = `틀렸어요. 다시 시도해보세요! (시도 ${trainingState.attempts}회)`;
+    }, 600);
+  }
+}
+
+function showHint() {
+  trainingState.hintLevel = Math.min(trainingState.hintLevel + 1, 2);
+  const idx = trainingState.moveIdx;
+  const san = game.moves[idx];
+  const isWhite = idx % 2 === 0;
+  const moveNum = Math.floor(idx / 2) + 1;
+  const cacheKey = `training_${game.pgn.slice(0,50)}_${idx}`;
+  const analysis = aiCache[cacheKey];
+  if (analysis) showPuzzle(analysis, san, isWhite, moveNum);
+}
+
+function giveUp() {
+  const idx = trainingState.moveIdx;
+  const cacheKey = `training_${game.pgn.slice(0,50)}_${idx}`;
+  const analysis = aiCache[cacheKey];
+  if (!analysis) return;
+
+  trainingState.results.push({
+    idx, san: game.moves[idx], isBest: false,
+    attempts: trainingState.attempts, gaveUp: true
+  });
+
+  const nextSan = game.moves[idx + 1] || null;
+  let html = `
+    <div style="padding:16px;display:flex;flex-direction:column;gap:14px">
+      <div class="hint-box" style="border-color:rgba(74,222,128,0.3)">
+        <div class="hint-label" style="color:var(--best)">✅ 정답</div>
+        <span style="font-size:20px;font-weight:700;font-family:'JetBrains Mono',monospace;color:var(--best)">${analysis.best_move}</span>
+      </div>
+      <div class="ai-section">
+        <div class="ai-section-header">왜 이 수가 최선인가요?</div>
+        <div class="ai-section-body">${escHtml(analysis.why_best||'')}</div>
+      </div>`;
+
+  if (nextSan && analysis.opponent_intent && analysis.opponent_intent !== '없음') {
+    html += `
+      <div class="opponent-box" style="border-radius:4px;padding:12px 14px">
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:1.5px;color:var(--gold);margin-bottom:6px">⚔️ 상대방 응수 · ${nextSan}</div>
+        ${escHtml(analysis.opponent_intent)}
+      </div>`;
+  }
+
+  html += `
+      <button class="btn btn-gold" onclick="nextTrainingStep()" style="width:100%">
+        다음 수로 → (${idx + 2}/${game.moves.length})
+      </button>
+    </div>`;
+  setTrainingContent(html);
+}
+
+function showPuzzleCorrect() {
+  const idx = trainingState.moveIdx;
+  const cacheKey = `training_${game.pgn.slice(0,50)}_${idx}`;
+  const analysis = aiCache[cacheKey];
+  const nextSan = game.moves[idx + 1] || null;
+  const attempts = trainingState.attempts;
+
+  let html = `
+    <div style="padding:16px;display:flex;flex-direction:column;gap:14px">
+      <div style="text-align:center;padding:16px;background:rgba(74,222,128,0.1);border:1px solid rgba(74,222,128,0.3);border-radius:4px">
+        <div style="font-size:28px;margin-bottom:6px">${attempts === 1 ? '🎉' : attempts <= 3 ? '👍' : '✅'}</div>
+        <div style="font-size:16px;font-weight:700;color:var(--best)">
+          ${attempts === 1 ? '한 번에 맞췄어요!' : `${attempts}번 만에 맞췄어요!`}
+        </div>
+        <div style="font-size:20px;font-weight:700;font-family:'JetBrains Mono',monospace;color:var(--best);margin-top:6px">${analysis?.best_move||''}</div>
+      </div>
+      ${analysis?.why_best ? `
+      <div class="ai-section">
+        <div class="ai-section-header">왜 이 수가 최선인가요?</div>
+        <div class="ai-section-body">${escHtml(analysis.why_best)}</div>
+      </div>` : ''}`;
+
+  if (nextSan && analysis?.opponent_intent && analysis.opponent_intent !== '없음') {
+    html += `
+      <div class="opponent-box" style="border-radius:4px;padding:12px 14px">
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:1.5px;color:var(--gold);margin-bottom:6px">⚔️ 상대방 응수 · ${nextSan}</div>
+        ${escHtml(analysis.opponent_intent)}
+      </div>`;
+  }
+
+  html += `
+      <button class="btn btn-gold" onclick="nextTrainingStep()" style="width:100%">
+        다음 수로 → (${idx + 2}/${game.moves.length})
+      </button>
+    </div>`;
+  setTrainingContent(html);
+}
+
+function nextTrainingStep() {
+  trainingState.moveIdx++;
+  trainingState.hintLevel = 0;
+  trainingState.attempts = 0;
+  trainingState.phase = 'my_move';
+  runTrainingStep();
+}
+
+async function showGameSummary() {
+  setTrainingContent(`<div class="ai-loading"><div class="ai-spinner"></div>게임 전체 총평 생성 중...</div>`);
+
+  const results = trainingState.results;
+  const total = results.length;
+  const bestCount = results.filter(r => r.isBest).length;
+  const solvedFirst = results.filter(r => !r.isBest && !r.gaveUp && r.attempts === 1).length;
+  const gaveUpCount = results.filter(r => r.gaveUp).length;
+
+  const prompt = `체스 코치로서 아래 훈련 결과를 바탕으로 한국어로 총평해주세요.
+
+[게임 정보] ${buildGameContext()}
+[전체 수순] ${buildMoveHistory(game.moves.length - 1)}
+[훈련 결과]
+- 전체 수: ${total}수
+- 최선의 수: ${bestCount}수
+- 문제 첫 시도 정답: ${solvedFirst}수
+- 정답 포기: ${gaveUpCount}수
+
+아래 JSON만 출력하세요:
+{
+  "overall": "전체적인 게임 평가 3~4문장",
+  "strengths": "잘한 점 2~3가지",
+  "weaknesses": "개선할 점 2~3가지",
+  "lessons": "이 게임에서 배울 수 있는 핵심 교훈 2~3가지",
+  "homework": "앞으로 연습해야 할 것 1~2가지"
+}`;
+
+  try {
+    const key = getApiKey();
+    const res = await fetch('https://chess-api.suwonleeinlboro.workers.dev', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': key },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1200,
+        system: '체스 코치. 순수 JSON만 출력.',
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+    const data = await res.json();
+    const raw = data.content?.[0]?.text || '';
+    const clean = raw.replace(/```json|```/g,'').trim();
+    const summary = JSON.parse(clean);
+
+    const accuracy = total ? Math.round((bestCount / total) * 100) : 0;
+
+    let html = `
+      <div style="padding:16px;display:flex;flex-direction:column;gap:14px">
+        <div style="text-align:center;padding:20px;background:rgba(201,168,76,0.08);border:1px solid rgba(201,168,76,0.2);border-radius:4px">
+          <div style="font-size:32px;margin-bottom:8px">🏆</div>
+          <div style="font-size:22px;font-weight:700;color:var(--gold)">훈련 완료!</div>
+          <div style="font-size:14px;color:var(--muted);margin-top:4px">${total}수 완주</div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;text-align:center">
+          <div style="background:var(--surface2);padding:12px;border-radius:4px">
+            <div style="font-size:24px;font-weight:700;color:var(--best)">${bestCount}</div>
+            <div style="font-size:10px;color:var(--muted);text-transform:uppercase">최선의 수</div>
+          </div>
+          <div style="background:var(--surface2);padding:12px;border-radius:4px">
+            <div style="font-size:24px;font-weight:700;color:var(--gold)">${accuracy}%</div>
+            <div style="font-size:10px;color:var(--muted);text-transform:uppercase">정확도</div>
+          </div>
+          <div style="background:var(--surface2);padding:12px;border-radius:4px">
+            <div style="font-size:24px;font-weight:700;color:var(--inaccuracy)">${gaveUpCount}</div>
+            <div style="font-size:10px;color:var(--muted);text-transform:uppercase">포기</div>
+          </div>
+        </div>
+
+        <div class="ai-section">
+          <div class="ai-section-header">📊 전체 평가</div>
+          <div class="ai-section-body">${escHtml(summary.overall||'')}</div>
+        </div>
+        <div class="ai-section">
+          <div class="ai-section-header">💪 잘한 점</div>
+          <div class="ai-section-body">${escHtml(summary.strengths||'')}</div>
+        </div>
+        <div class="ai-section">
+          <div class="ai-section-header">🔧 개선할 점</div>
+          <div class="ai-section-body">${escHtml(summary.weaknesses||'')}</div>
+        </div>
+        <div class="hint-box">
+          <div class="hint-label">📚 이 게임의 교훈</div>
+          ${escHtml(summary.lessons||'')}
+        </div>
+        <div class="hint-box" style="border-color:rgba(201,168,76,0.3)">
+          <div class="hint-label" style="color:var(--gold)">✏️ 숙제</div>
+          ${escHtml(summary.homework||'')}
+        </div>
+        <button class="btn btn-outline" onclick="stopTraining();hideTrainingPanel()" style="width:100%">
+          훈련 종료
+        </button>
+      </div>`;
+
+    setTrainingContent(html);
+  } catch(e) {
+    setTrainingContent(`<div class="api-key-notice">총평 생성 오류: ${e.message}</div>`);
+  }
+}
+
+function setTrainingContent(html) {
+  const el = document.getElementById('training-content');
+  if (el) el.innerHTML = html;
 }
 
 // ══════════════════════════════════════════════

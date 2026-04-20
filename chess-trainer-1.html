@@ -1238,22 +1238,22 @@ async function fetchTrainingAnalysis(idx) {
   const cacheKey = `training_${game.pgn.slice(0,50)}_${idx}`;
   if (aiCache[cacheKey]) return aiCache[cacheKey];
 
-  const prompt = `당신은 체스 그랜드마스터 수준의 코치입니다.
+  const prompt = `체스 코치로서 아래 수를 분석하세요.
 
-[게임 정보] ${gameCtx}
-[지금까지 수순] ${history}
-[분석할 수] ${moveNum}번째 수 · ${side} · ${san}
+[게임] ${gameCtx}
+[수순] ${history}
+[분석할 수] ${moveNum}번째 · ${side} · ${san}
 
-아래 JSON만 출력하세요 (다른 텍스트 없음):
+JSON만 출력 (다른 텍스트 없음):
 {
   "is_best": true 또는 false,
   "classification": "best|good|inaccuracy|mistake|blunder",
-  "explanation": "이 수의 의미와 전략적 이유를 3~4문장으로. 장단점 모두 포함",
-  "best_move": "최선의 수가 아니라면 구체적인 수 표기 (예: Nf3). 최선이면 '${san}'",
-  "hint1": "최선이 아닐 때 첫 번째 힌트 — 어떤 방향을 봐야 하는지 (수를 직접 말하지 말 것)",
-  "hint2": "두 번째 힌트 — 좀 더 구체적인 힌트 (수를 직접 말하지 말 것)",
-  "why_best": "최선의 수가 왜 더 나은지 2~3문장으로 설명",
-  "opponent_intent": "${nextSan ? `상대방 ${nextSan}의 의도와 위협 2문장` : '없음'}"
+  "explanation": "이 수의 의미와 전략적 이유 2~3문장",
+  "best_move": "최선의 수 표기 (예: Nf3). 현재 수가 최선이면 '${san}'",
+  "hint1": "첫 번째 힌트 — 방향만 알려줌 (수 직접 언급 금지)",
+  "hint2": "두 번째 힌트 — 좀 더 구체적 (수 직접 언급 금지)",
+  "why_best": "최선의 수가 왜 더 나은지 2문장",
+  "opponent_intent": "${nextSan ? `상대방 ${nextSan}의 의도 1~2문장` : '없음'}"
 }`;
 
   try {
@@ -1263,7 +1263,7 @@ async function fetchTrainingAnalysis(idx) {
       headers: { 'Content-Type': 'application/json', 'x-api-key': key },
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
-        max_tokens: 1200,
+        max_tokens: 2000,
         system: '체스 그랜드마스터 코치. 순수 JSON만 출력.',
         messages: [{ role: 'user', content: prompt }]
       })

@@ -1039,11 +1039,9 @@ function showAiError(msg) {
 function applyApiKey() {
   const val = document.getElementById('api-key-input')?.value?.trim() || '';
   if (!val) { showToast('⚠️ API 키를 입력해주세요'); return; }
-  if (!val.startsWith('sk-ant-')) { showToast('⚠️ 올바른 키 형식이 아닙니다 (sk-ant-... 로 시작해야 해요)'); return; }
   saveApiKey(val);
   updateApiKeyStatus(true);
   showToast('🔑 API 키 저장 완료!');
-  // 현재 수가 있으면 바로 분석
   if (game.currentMove > 0) analyzeCurrentMove();
 }
 

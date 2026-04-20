@@ -933,7 +933,9 @@ async function analyzeCurrentMove() {
   const moveNum = Math.ceil(game.currentMove / 2);
   const history = buildMoveHistory(idx);
   const gameCtx = buildGameContext();
-  const nextSan = game.moves[game.currentMove] || null; // 상대방 다음 수
+  const nextSan = game.moves[game.currentMove] || null;
+  const fenBefore = game.positions[game.currentMove - 1] || '';
+  const fenAfter = game.positions[game.currentMove] || '';
 
   // Stockfish 분석 결과가 있으면 포함
   const hasEval = game.classifications[idx] !== null;
@@ -941,38 +943,25 @@ async function analyzeCurrentMove() {
     ? `Stockfish 평가: ${getClassLabel(game.classifications[idx])} (점수: ${game.evals[game.currentMove]?.toFixed(2)||'?'})`
     : '';
 
-  const prompt = `당신은 세계 최고 수준의 체스 코치입니다. 아래 기보를 깊이 분석해주세요.
+  const prompt = `당신은 체스 그랜드마스터이자 전문 코치입니다.
 
-[게임 정보]
-${gameCtx}
+[게임 정보] ${gameCtx}
+[전체 수순] ${history}
+[분석할 수] ${moveNum}번째 (${side}): ${san}
+[이 수 전 FEN] ${fenBefore}
+[이 수 후 FEN] ${fenAfter}
+${evalCtx ? `[엔진 평가] ${evalCtx}` : ''}
+${nextSan ? `[상대방 응수] ${nextSan}` : ''}
 
-[지금까지의 전체 수순]
-${history}
-
-[지금 분석할 수]
-${moveNum}번째 수 · ${side} · ${san}
-${evalCtx}
-
-체스 그랜드마스터 수준으로 아래 사항을 분석하세요:
-
-1. 이 수가 최선인지 판단할 때 다음을 고려하세요:
-   - 기물 활성화 및 협력
-   - 킹 안전
-   - 폰 구조
-   - 공간 장악
-   - 전술적 모티프 (포크, 핀, 스큐어, 발견된 공격 등)
-   - 장기적 전략 계획
-
-2. 이 포지션에서 실제로 더 나은 수가 있다면 구체적인 수를 제시하세요 (예: Nf3, e4, O-O 등)
-
-3. 설명은 한국어로, 체스를 배우는 사람도 이해할 수 있게 쉽고 구체적으로 해주세요.
-
-아래 JSON 형식으로만 응답하세요. 절대 다른 텍스트 없이 JSON만 출력하세요:
+포지션을 깊이 분석하여 반드시 유효한 JSON만 출력하세요. 문자열 안에 큰따옴표나 줄바꿈 사용 금지:
 {
-  "classification": "best|good|inaccuracy|mistake|blunder 중 하나 (신중하게 판단)",
-  "my_move_explanation": "${san}의 의미와 이 수를 둔 전략적/전술적 이유를 구체적으로 3~4문장으로 설명. 이 수의 장단점 모두 언급",
+  "classification": "best 또는 good 또는 inaccuracy 또는 mistake 또는 blunder",
+  "my_move_explanation": "이 수의 전략적 의미와 장단점 2~3문장. FEN 포지션 기반으로 구체적으로",
   "is_best": true 또는 false,
-  "best_move_hint": "최선의 수가 아니라면 구체적으로 어떤 수(예: Nf3, e4)가 더 좋았는지와 그 이유를 2~3문장으로. 최선이면 빈 문자열",
+  "best_move_hint": "최선이 아니면 어떤 수가 더 좋았는지와 이유 2문장. 최선이면 빈 문자열",
+  "what_to_consider": "이 포지션 핵심 전략 포인트 2가지. 기물 활성화/킹안전/폰구조/전술 중심",
+  "opponent_next": "${nextSan ? `상대방 ${nextSan}의 전략적 의도와 위협 2문장` : '없음'}"
+}`;
   "what_to_consider": "이 포지션에서 반드시 고려해야 할 전략/전술 핵심 포인트 2~3가지를 구체적으로",
   "opponent_next": "${nextSan ? `상대방이 ${nextSan}으로 응수했습니다. 이 수의 전략적 의도, 위협, 그리고 앞으로의 계획을 2~3문장으로 분석` : '게임 종료'}"
 }`;
@@ -989,10 +978,8 @@ ${evalCtx}
       headers,
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
-        max_tokens: 1500,
-        system: `당신은 체스 그랜드마스터 수준의 전문 체스 코치입니다. 
-주어진 기보를 깊이 분석하여 각 수의 전략적/전술적 의미를 정확하게 평가합니다.
-반드시 순수 JSON만 출력하세요. 마크다운이나 다른 텍스트는 절대 포함하지 마세요.`,
+        max_tokens: 2000,
+        system: '체스 그랜드마스터 코치. 반드시 유효한 JSON만 출력. 문자열 안에 큰따옴표나 줄바꿈 사용 금지.',
         messages: [{ role: 'user', content: prompt }]
       })
     });
@@ -1005,14 +992,18 @@ ${evalCtx}
     const data = await res.json();
     const raw = data.content?.[0]?.text || '';
 
-    // JSON 파싱
+    // JSON 파싱 (여러 방법 시도)
     let parsed;
     try {
       const clean = raw.replace(/```json|```/g, '').trim();
       parsed = JSON.parse(clean);
     } catch(e) {
-      // JSON 파싱 실패 시 텍스트 그대로 표시
-      parsed = { _raw: raw };
+      try {
+        const match = raw.match(/\{[\s\S]*\}/);
+        parsed = match ? JSON.parse(match[0]) : { _raw: raw };
+      } catch(e2) {
+        parsed = { _raw: raw };
+      }
     }
 
     aiCache[cacheKey] = { parsed, idx, san, isWhite, moveNum, nextSan };
@@ -1234,26 +1225,54 @@ async function fetchTrainingAnalysis(idx) {
   const gameCtx = buildGameContext();
   const nextSan = game.moves[idx + 1] || null;
 
+  // 이 수를 두기 전 포지션 FEN (더 정확한 분석용)
+  const fenBefore = game.positions[idx] || '';
+  const fenAfter = game.positions[idx + 1] || '';
+
   // 캐시 확인
   const cacheKey = `training_${game.pgn.slice(0,50)}_${idx}`;
   if (aiCache[cacheKey]) return aiCache[cacheKey];
 
-  const prompt = `체스 코치로서 아래 수를 분석하세요.
+  const prompt = `당신은 체스 그랜드마스터이자 전문 코치입니다. 아래 포지션과 수를 깊이 분석하세요.
 
-[게임] ${gameCtx}
-[수순] ${history}
-[분석할 수] ${moveNum}번째 · ${side} · ${san}
+[게임 정보]
+${gameCtx}
 
-JSON만 출력 (다른 텍스트 없음):
+[전체 수순]
+${history}
+
+[현재 분석할 수]
+- ${moveNum}번째 수 (${side}): ${san}
+- 이 수를 두기 전 FEN: ${fenBefore}
+- 이 수를 둔 후 FEN: ${fenAfter}
+${nextSan ? `- 상대방 다음 수: ${nextSan}` : ''}
+
+[분석 기준]
+다음 요소들을 종합적으로 판단하세요:
+1. 기물 활성화 및 협력도
+2. 킹 안전 (캐슬링 가능 여부, 킹 주변 방어)
+3. 폰 구조 (doubled, isolated, passed pawn)
+4. 센터 장악
+5. 전술적 모티프 (포크, 핀, 스큐어, 발견된 공격, 매달린 기물)
+6. 장기적 계획과 포지셔널 우위
+
+[분류 기준]
+- best: 이 포지션에서 가장 강한 수 (다른 수보다 명확히 우월)
+- good: 좋은 수지만 더 강한 수가 있음
+- inaccuracy: 괜찮지만 기회를 놓침
+- mistake: 포지션을 나쁘게 만드는 수
+- blunder: 기물을 잃거나 게임을 지는 심각한 실수
+
+반드시 유효한 JSON만 출력하세요. 문자열 안에 큰따옴표나 줄바꿈 사용 금지:
 {
   "is_best": true 또는 false,
-  "classification": "best|good|inaccuracy|mistake|blunder",
-  "explanation": "이 수의 의미와 전략적 이유 2~3문장",
-  "best_move": "최선의 수 표기 (예: Nf3). 현재 수가 최선이면 '${san}'",
-  "hint1": "첫 번째 힌트 — 방향만 알려줌 (수 직접 언급 금지)",
-  "hint2": "두 번째 힌트 — 좀 더 구체적 (수 직접 언급 금지)",
-  "why_best": "최선의 수가 왜 더 나은지 2문장",
-  "opponent_intent": "${nextSan ? `상대방 ${nextSan}의 의도 1~2문장` : '없음'}"
+  "classification": "best 또는 good 또는 inaccuracy 또는 mistake 또는 blunder",
+  "explanation": "${san}의 전략적 의미와 이 수가 좋은 이유 또는 나쁜 이유를 구체적으로 2문장",
+  "best_move": "${san}이 최선이면 그대로, 아니면 더 나은 수의 표기법 (예: Nf3)",
+  "hint1": "어떤 전략적 요소에 집중해야 하는지 방향 제시. 절대 수를 직접 말하지 말것",
+  "hint2": "더 구체적인 힌트. 어떤 기물을 어떤 방향으로 생각해야 하는지. 절대 수를 직접 말하지 말것",
+  "why_best": "최선의 수가 왜 이 포지션에서 가장 강한지 구체적 이유 2문장",
+  "opponent_intent": "${nextSan ? `상대방이 ${nextSan}을 둔 전략적 의도와 만들어진 위협 2문장` : '없음'}"
 }`;
 
   try {
